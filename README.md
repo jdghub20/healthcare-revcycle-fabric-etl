@@ -191,7 +191,7 @@ These production-ready DAX measures run natively on top of the `v_reporting_revc
     ```dax
     Average Charge Lag Days = AVERAGE(v_reporting_revcycle_star_flat[Charge_Lag_Days])
     ```
-*   **Metric 5: Total DNFB Claims Value**
+*   **Metric 5: Total Discharged Not Final Billed (DNFB) Claims Value**
     ```dax
     Total DNFB Financial Volume = CALCULATE(SUM(v_reporting_revcycle_star_flat[Gross_Charges]), v_reporting_revcycle_star_flat[Is_DNFB_Flag] = 1)
     ```
@@ -205,7 +205,7 @@ These production-ready DAX measures run natively on top of the `v_reporting_revc
     ```dax
     Days Sales Outstanding (DSO) = AVERAGE(v_reporting_revcycle_star_flat[Days_Outstanding_In_AR])
     ```
-*   **Metric 8: Aged A/R Rate Over 90 Days**
+*   **Metric 8: Aged A/R ( Account Receivable) Rate Over 90 Days**
     ```dax
     Aged AR Rate Over 90 Days = DIVIDE(CALCULATE(COUNT(v_reporting_revcycle_star_flat[Claim_ID]), v_reporting_revcycle_star_flat[Is_Aged_Over_90_Days] = 1), COUNT(v_reporting_revcycle_star_flat[Claim_ID]), 0)
     ```
