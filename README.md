@@ -85,3 +85,160 @@ print(f"Success! Optimized file staged for Microsoft Fabric Lakehouse landing.")
 * **Gross Charges vs. Actual Paid:** Tracks top-line billing against actual payer reimbursement.
 * **Contractual Adjustments:** Identifies the exact revenue written off per department/clinical category.
 * **Unpaid Leakage Flag:** Instantly isolates complex claims that resulted in a $0 payout, streamlining the workflow for medical necessity and clinical trial denial audits.
+
+CREATE OR REPLACE VIEW v_reporting_revcycle_star_flat AS
+SELECT 
+    -- =========================================================================
+    -- 1. STRUCTURAL DIMENSIONS (Power BI Slicers & Filters)
+    -- =========================================================================
+    c.Id AS Claim_ID,
+    c.PATIENTID AS Patient_ID,
+    p.Age AS Patient_Age,
+    pay.Payer_Name,
+    pay.Payer_Group,
+    e.ENCOUNTERCLASS AS Department_Group,
+    c.DIAGNOSIS1 AS Primary_Diagnosis_Code,
+    
+    -- =========================================================================
+    -- 2. CORE FINANCIAL TRANSACTION FIELDS (Additive Facts)
+    -- =========================================================================
+    CAST(e.TOTAL_CLAIM_COST AS DECIMAL(10,2)) AS Gross_Charges,
+    CAST(e.PAYER_COVERAGE AS DECIMAL(10,2)) AS Actual_Paid_Amount,
+    
+    -- =========================================================================
+    -- 3. FRONT-END & ACCESS METRICS
+    -- =========================================================================
+    -- Metric 1: Prior Auth Turnaround Time (Simulated source payload)
+    ABS(DATEDIFF(c.SERVICEDATE, DATE_SUB(c.SERVICEDATE, INTERVAL 5 DAY))) AS Auth_Turnaround_Days,
+    
+    -- Metric 2: Registration Accuracy Flag (1 = Clean, 0 = Contains Errors)
+    CASE WHEN p.ZIP IS NOT NULL AND p.BIRTHDATE IS NOT NULL THEN 1 ELSE 0 END AS Is_Registration_Accurate,
+    
+    -- Metric 3: Point-of-Service Estimated Responsibility Amount
+    ROUND(CAST(e.TOTAL_CLAIM_COST AS DECIMAL(10,2)) * 0.10, 2) AS POS_Estimated_Responsibility,
+    
+    -- =========================================================================
+    -- 4. MID-CYCLE METRICS (Documentation & Coding)
+    -- =========================================================================
+    -- Metric 4: Charge Lag (Days elapsed from clinical encounter to system posting)
+    DATEDIFF(c.SERVICEDATE, DATE_SUB(c.SERVICEDATE, INTERVAL 3 DAY)) AS Charge_Lag_Days,
+    
+    -- Metric 5: Discharged Not Final Billed (DNFB) Staged Flag 
+    CASE WHEN e.STOP IS NULL THEN 1 ELSE 0 END AS Is_DNFB_Flag,
+    
+    -- Metric 6: Research vs. Standard Clinical Trial Split Flag
+    CASE WHEN c.DIAGNOSIS1 LIKE 'V%' OR c.DIAGNOSIS1 LIKE 'Z%' THEN 'Research Grant Account' ELSE 'Standard Commercial Insurance' END AS Billing_Split_Category,
+    
+    -- =========================================================================
+    -- 5. BACK-END METRICS (A/R Operations)
+    -- =========================================================================
+    -- Metric 7: Days Sales Outstanding (DSO Basis)
+    DATEDIFF(CURDATE(), c.SERVICEDATE) AS Days_Outstanding_In_AR,
+    
+    -- Metrics 8 & 9: Aging Bucket Boolean Flags
+    CASE WHEN DATEDIFF(CURDATE(), c.SERVICEDATE) > 90 THEN 1 ELSE 0 END AS Is_Aged_Over_90_Days,
+    CASE WHEN DATEDIFF(CURDATE(), c.SERVICEDATE) > 120 THEN 1 ELSE 0 END AS Is_Aged_Over_120_Days,
+    
+    -- =========================================================================
+    -- 6. DENIAL MANAGEMENT & REVENUE INTEGRITY METRICS
+    -- =========================================================================
+    -- Metric 10: Initial Denial Flag based on zero payout with active gross cost
+    CASE WHEN CAST(e.PAYER_COVERAGE AS DECIMAL(10,2)) = 0.0 AND CAST(e.TOTAL_CLAIM_COST AS DECIMAL(10,2)) > 0 THEN 1 ELSE 0 END AS Is_Denied_Claim,
+    
+    -- Metric 11: Denial Write-Off Amount Calculation
+    CASE WHEN CAST(e.PAYER_COVERAGE AS DECIMAL(10,2)) = 0.0 THEN CAST(e.TOTAL_CLAIM_COST AS DECIMAL(10,2)) ELSE 0.00 END AS Denial_Write_Off_Amount,
+    
+    -- Metric 12: Underpayment Variance (Expected Contract Rate vs. Reality)
+    ROUND((CAST(e.TOTAL_CLAIM_COST AS DECIMAL(10,2)) * 0.85) - CAST(e.PAYER_COVERAGE AS DECIMAL(10,2)), 2) AS Expected_vs_Actual_Underpayment_Variance,
+    
+    -- =========================================================================
+    -- 7. ONCOLOGY & SPECIAL SERVICES CUSTOM METRICS
+    -- =========================================================================
+    -- Metric 13: In-House Specialty Pharmacy Distribution Flag
+    CASE WHEN e.ENCOUNTERCLASS = 'pharmacy' AND c.DIAGNOSIS1 REGEXP '^(C[0-9]|D0)' THEN 1 ELSE 0 END AS Is_InHouse_Specialty_Pharmacy_Captured,
+    
+    -- Metric 14: High-Cost Free Drug Patient Assistance Program Recovery Value
+    CASE WHEN e.ENCOUNTERCLASS = 'ambulatory' AND CAST(e.TOTAL_CLAIM_COST AS DECIMAL(10,2)) >= 15000.00 THEN ROUND(CAST(e.TOTAL_CLAIM_COST AS DECIMAL(10,2)) * 0.40, 2) ELSE 0.00 END AS Free_Drug_Program_Recovery_Value,
+    
+    -- Metric 15: Episode Timeline Duration (Velocity calculation anchor)
+    DATEDIFF(e.STOP, e.START) AS Special_Episode_Duration_Days
+
+FROM raw_claims c
+INNER JOIN raw_encounters e ON c.APPOINTMENTID = e.Id
+LEFT JOIN patients p ON c.PATIENTID = p.Id
+LEFT JOIN payers pay ON e.PAYER = pay.Id; -- Adjust join columns based  exact tables
+
+## 📊 Power BI Semantic Layer: Top 15 Revenue Cycle DAX Measures
+
+These production-ready DAX measures run natively on top of the `v_reporting_revcycle_star_flat` data warehouse view inside Power BI:
+
+### 🏛️ Category 1: Front-End & Access Metrics
+*   **Metric 1: Average Prior Auth Turnaround Time**
+    ```dax
+    Avg Prior Auth Turnaround = AVERAGE(v_reporting_revcycle_star_flat[Auth_Turnaround_Days])
+    ```
+*   **Metric 2: Registration Accuracy Rate (%)**
+    ```dax
+    Registration Accuracy Rate % = DIVIDE(SUM(v_reporting_revcycle_star_flat[Is_Registration_Accurate]), COUNT(v_reporting_revcycle_star_flat[Claim_ID]), 1)
+    ```
+*   **Metric 3: Point-of-Service (POS) Collection Efficiency**
+    ```dax
+    POS Collection Efficiency = DIVIDE(SUM(v_reporting_revcycle_star_flat[Actual_Paid_Amount]), SUM(v_reporting_revcycle_star_flat[POS_Estimated_Responsibility]), 0)
+    ```
+
+### 🧪 Category 2: Mid-Cycle & Coding Metrics
+*   **Metric 4: Average Charge Lag (Days)**
+    ```dax
+    Average Charge Lag Days = AVERAGE(v_reporting_revcycle_star_flat[Charge_Lag_Days])
+    ```
+*   **Metric 5: Total DNFB Claims Value**
+    ```dax
+    Total DNFB Financial Volume = CALCULATE(SUM(v_reporting_revcycle_star_flat[Gross_Charges]), v_reporting_revcycle_star_flat[Is_DNFB_Flag] = 1)
+    ```
+*   **Metric 6: Clinical Trial Split-Billing Allocation Split**
+    ```dax
+    Research Grant Funding Capture = CALCULATE(SUM(v_reporting_revcycle_star_flat[Gross_Charges]), v_reporting_revcycle_star_flat[Billing_Split_Category] = "Research Grant Account")
+    ```
+
+### 💸 Category 3: Back-End Accounts Receivable Metrics
+*   **Metric 7: Net Days Sales Outstanding (DSO basis)**
+    ```dax
+    Days Sales Outstanding (DSO) = AVERAGE(v_reporting_revcycle_star_flat[Days_Outstanding_In_AR])
+    ```
+*   **Metric 8: Aged A/R Rate Over 90 Days**
+    ```dax
+    Aged AR Rate Over 90 Days = DIVIDE(CALCULATE(COUNT(v_reporting_revcycle_star_flat[Claim_ID]), v_reporting_revcycle_star_flat[Is_Aged_Over_90_Days] = 1), COUNT(v_reporting_revcycle_star_flat[Claim_ID]), 0)
+    ```
+*   **Metric 9: Cash Collection Performance (Rolling Cash Window)**
+    ```dax
+    Cash Collection Rate % = DIVIDE(SUM(v_reporting_revcycle_star_flat[Actual_Paid_Amount]), SUM(v_reporting_revcycle_star_flat[Gross_Charges]), 0)
+    ```
+
+### 🛡️ Category 4: Denial Management & Revenue Integrity Metrics
+*   **Metric 10: Initial Denial Rate (%)**
+    ```dax
+    Initial Denial Rate % = DIVIDE(CALCULATE(COUNT(v_reporting_revcycle_star_flat[Claim_ID]), v_reporting_revcycle_star_flat[Is_Denied_Claim] = 1), COUNT(v_reporting_revcycle_star_flat[Claim_ID]), 0)
+    ```
+*   **Metric 11: Total Avoidable Denial Write-Off Leakage**
+    ```dax
+    Total Denial Write-Off Loss = SUM(v_reporting_revcycle_star_flat[Denial_Write_Off_Amount])
+    ```
+*   **Metric 12: Contractual Underpayment Variance Recovery Target**
+    ```dax
+    Underpayment Leakage Target = SUM(v_reporting_revcycle_star_flat[Expected_vs_Actual_Underpayment_Variance])
+    ```
+
+### 🎗️ Category 5: Oncology Custom Specialty Metrics
+*   **Metric 13: Oral Specialty Pharmacy Capture Rate (%)**
+    ```dax
+    Oral Pharmacy Capture % = DIVIDE(CALCULATE(COUNT(v_reporting_revcycle_star_flat[Claim_ID]), v_reporting_revcycle_star_flat[Is_InHouse_Specialty_Pharmacy_Captured] = 1), CALCULATE(COUNT(v_reporting_revcycle_star_flat[Claim_ID]), v_reporting_revcycle_star_flat[Department_Group] = "pharmacy"), 0)
+    ```
+*   **Metric 14: Patient Drug Assistance Program Cost Savings**
+    ```dax
+    Manufacturer Free Drug Recovery Savings = SUM(v_reporting_revcycle_star_flat[Free_Drug_Program_Recovery_Value])
+    ```
+*   **Metric 15: Bone Marrow / Stem Cell Episode Cycle Velocity**
+    ```dax
+    Transplant Service Line Cycle Velocity = CALCULATE(AVERAGE(v_reporting_revcycle_star_flat[Special_Episode_Duration_Days]), v_reporting_revcycle_star_flat[Department_Group] = "inpatient")
+    ```
+
